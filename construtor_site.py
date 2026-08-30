@@ -1,8 +1,9 @@
 """
 MÓDULO: Fase 4 - Frontend Builder (Construtor do Site Estático)
-OBJETIVO: Varrer os arquivos Markdown gerados na Fase 3 dentro da pasta 'noticias_prontas',
-          converter o conteúdo para HTML com formatação moderna e injetar em um template
-          responsivo, moderno e elegante utilizando Tailwind CSS.
+OBJETIVO: Conectar-se ao banco de dados relacional SQLite 'portal.db', extrair as matérias
+          via SQL (SELECT * FROM noticias ORDER BY data_criacao DESC), converter o conteúdo
+          para HTML com formatação moderna e injetar em um template responsivo e elegante
+          utilizando Tailwind CSS.
           O resultado final é compilado e salvo em 'public/index.html'.
 """
 
@@ -12,7 +13,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 # Garante suporte a caracteres UTF-8 no terminal do Windows
 if sys.platform == "win32":
@@ -21,16 +22,8 @@ if sys.platform == "win32":
     except AttributeError:
         pass
 
-# Tentativa de importação da biblioteca markdown com fallback seguro
-try:
-    import markdown
-except ImportError:
-    print("\n" + "!" * 80)
-    print("[ERRO] A biblioteca 'markdown' não está instalada no ambiente Python atual.")
-    print("Execute no terminal:")
-    print("    pip install markdown")
-    print("!" * 80 + "\n")
-    sys.exit(1)
+# Importa o módulo de banco de dados relacional SQLite
+from banco_dados import contar_noticias, inicializar_banco, listar_noticias
 
 
 MESES_PT = {
@@ -141,154 +134,103 @@ def calcular_tempo_leitura(texto: str) -> str:
     return f"{minutos} min de leitura"
 
 
-def processar_arquivo_markdown(caminho_arquivo: Path) -> dict[str, Any] | None:
+def carregar_noticias_do_banco(db_path: str = "portal.db") -> List[Dict[str, Any]]:
     """
-    Lê um arquivo .md, extrai metadados (Título, Imagem, Resumo, Fonte) e converte para HTML.
-
+    Extrai todas as notícias salvas no banco de dados SQLite (portal.db) via instrução SQL.
+    Converte a string JSON da coluna 'pontos_principais' de volta para lista e monta as tags HTML.
+    
     Args:
-        caminho_arquivo (Path): Caminho para o arquivo .md.
+        db_path (str): Caminho do arquivo SQLite (portal.db).
 
     Returns:
-        Optional[Dict[str, Any]]: Dicionário com os dados processados da notícia.
+        List[Dict[str, Any]]: Lista de notícias formatadas para injeção no template HTML.
     """
-    try:
-        conteudo_bruto = caminho_arquivo.read_text(encoding="utf-8")
-    except Exception as e:
-        print(f"  [!] Erro ao ler '{caminho_arquivo.name}': {e}")
-        return None
+    inicializar_banco(db_path)
+    registros = listar_noticias(db_path=db_path)
+    print(f"[+] Carregadas {len(registros)} notícia(s) diretamente do banco SQLite '{db_path}'.")
 
-    # 1. Extração do Título (# Título)
-    match_titulo = re.search(r"^#\s+(.+)$", conteudo_bruto, re.MULTILINE)
-    titulo = (
-        match_titulo.group(1).strip()
-        if match_titulo
-        else caminho_arquivo.stem.replace("-", " ").title()
-    )
+    noticias_formatadas = []
+    for item in registros:
+        titulo = item.get("titulo", "Sem Título")
+        resumo = item.get("resumo", "Sem resumo disponível.")
+        pontos = item.get("pontos_principais", [])
+        
+        # Garante que pontos_principais seja uma lista de strings
+        if isinstance(pontos, str):
+            try:
+                pontos = json.loads(pontos)
+            except Exception:
+                pontos = [pontos]
+        elif not isinstance(pontos, list):
+            pontos = []
 
-    # 2. Extração da Imagem (![alt](url))
-    match_imagem = re.search(r"!\[.*?\]\((https?://[^\s\)]+)\)", conteudo_bruto)
-    imagem_url = (
-        match_imagem.group(1)
-        if match_imagem
-        else f"https://picsum.photos/seed/{caminho_arquivo.stem}/800/450"
-    )
+        impacto = item.get("impacto", "")
+        slug = item.get("slug") or "noticia"
+        imagem_url = item.get("imagem_url") or f"https://picsum.photos/seed/{slug}/800/450"
+        link_original = item.get("link_original") or "#"
+        categoria = item.get("categoria") or extrair_categoria_automatica(titulo, resumo)
+        data_criacao_iso = item.get("data_criacao")
 
-    # 3. Extração da Fonte Original (link markdown [texto](url))
-    match_fonte = re.search(r"\[(.*?)\]\((https?://[^\s\)]+)\)", conteudo_bruto)
-    if match_fonte:
-        fonte_nome = match_fonte.group(1).strip()
-        fonte_url = match_fonte.group(2).strip()
-    else:
-        fonte_nome = "Portal de Notícias Original"
-        fonte_url = "#"
+        # Formatação amigável da data
+        try:
+            dt = datetime.fromisoformat(data_criacao_iso)
+            data_formatada = formatar_data_curta_pt(dt)
+        except Exception:
+            data_formatada = formatar_data_curta_pt(datetime.now())
 
-    # 4. Extração do Resumo / Corpo textual da notícia
-    match_resumo = re.search(
-        r"##\s+Resumo da Notícia\s*\n+([\s\S]*?)(?=\n+##|\n+---|---|$)", conteudo_bruto
-    )
-    if match_resumo and match_resumo.group(1).strip():
-        texto_resumo_puro = match_resumo.group(1).strip()
-    else:
-        conteudo_sem_header = re.sub(
-            r"^#\s+.+$", "", conteudo_bruto, flags=re.MULTILINE
+        tempo_leitura = calcular_tempo_leitura(f"{resumo} {' '.join(pontos)} {impacto}")
+
+        # Monta a estrutura rica do conteúdo completo para o modal de leitura
+        bullets_html = "\n".join(
+            f"<li class='text-slate-300 leading-relaxed'>{html.escape(p)}</li>" for p in pontos if p
         )
-        conteudo_sem_header = re.sub(r"!\[.*?\]\(.*?\)", "", conteudo_sem_header)
-        conteudo_sem_header = re.sub(
-            r"🔗\s*\*\*Fonte Original:\*\*.*$",
-            "",
-            conteudo_sem_header,
-            flags=re.MULTILINE,
-        )
-        conteudo_sem_header = re.sub(
-            r"\*Publicado automaticamente.*$",
-            "",
-            conteudo_sem_header,
-            flags=re.MULTILINE,
-        )
-        conteudo_sem_header = re.sub(
-            r"^##\s+.*$", "", conteudo_sem_header, flags=re.MULTILINE
-        )
-        conteudo_sem_header = re.sub(
-            r"^---\s*$", "", conteudo_sem_header, flags=re.MULTILINE
-        )
-        texto_resumo_puro = conteudo_sem_header.strip()
+        
+        html_modal = f"""
+        <div class="space-y-6">
+            <div>
+                <h4 class="text-xs font-bold uppercase tracking-wider text-indigo-400 mb-2">Resumo da Matéria</h4>
+                <p class="text-slate-200 leading-relaxed text-base">{html.escape(resumo)}</p>
+            </div>
+            {f'''
+            <div class="bg-slate-950/70 border border-slate-800/90 rounded-2xl p-5 shadow-inner">
+                <h4 class="text-xs font-bold uppercase tracking-wider text-cyan-400 mb-3 flex items-center gap-2">
+                    <span>🎯</span> Pontos Principais
+                </h4>
+                <ul class="space-y-2 list-disc list-inside text-sm">
+                    {bullets_html}
+                </ul>
+            </div>
+            ''' if bullets_html else ''}
+            {f'''
+            <div class="bg-indigo-950/30 border border-indigo-900/50 rounded-2xl p-5 shadow-inner">
+                <h4 class="text-xs font-bold uppercase tracking-wider text-indigo-300 mb-2 flex items-center gap-2">
+                    <span>💡</span> Impacto &amp; Conclusão
+                </h4>
+                <p class="text-slate-300 leading-relaxed text-sm">{html.escape(impacto)}</p>
+            </div>
+            ''' if impacto else ''}
+        </div>
+        """
 
-    # Se a IA retornou erro ou vazio, coloca mensagem amigável
-    if not texto_resumo_puro or "Falha na estrutura" in texto_resumo_puro:
-        texto_resumo_puro = "Esta notícia foi coletada e curada pelo pipeline automatizado. Clique no botão de fonte para acessar o artigo completo na íntegra."
+        noticias_formatadas.append({
+            "id": item.get("id"),
+            "slug": slug,
+            "titulo": titulo,
+            "resumo_texto": resumo,
+            "resumo_curto": (resumo[:160] + "...") if len(resumo) > 160 else resumo,
+            "pontos_principais": pontos,
+            "impacto": impacto,
+            "imagem_url": imagem_url,
+            "fonte_nome": "Portal Oficial",
+            "fonte_url": link_original,
+            "categoria": categoria,
+            "data_formatada": data_formatada,
+            "data_iso": data_criacao_iso or datetime.now().isoformat(),
+            "tempo_leitura": tempo_leitura,
+            "html_completo": html_modal
+        })
 
-    # 5. Conversão Markdown completa para HTML
-    html_completo = markdown.markdown(
-        conteudo_bruto, extensions=["extra", "nl2br", "sane_lists", "toc"]
-    )
-
-    # 6. Data de modificação do arquivo ou data atual
-    try:
-        timestamp_mod = caminho_arquivo.stat().st_mtime
-        dt_mod = datetime.fromtimestamp(timestamp_mod)
-        data_formatada = formatar_data_curta_pt(dt_mod)
-        data_iso = dt_mod.isoformat()
-    except Exception:
-        dt_mod = datetime.now()
-        data_formatada = formatar_data_curta_pt(dt_mod)
-        data_iso = dt_mod.isoformat()
-
-    categoria = extrair_categoria_automatica(titulo, texto_resumo_puro)
-    tempo_leitura = calcular_tempo_leitura(texto_resumo_puro)
-
-    return {
-        "slug": caminho_arquivo.stem,
-        "arquivo": caminho_arquivo.name,
-        "titulo": titulo,
-        "imagem_url": imagem_url,
-        "resumo_texto": texto_resumo_puro,
-        "resumo_curto": (texto_resumo_puro[:160] + "...")
-        if len(texto_resumo_puro) > 160
-        else texto_resumo_puro,
-        "html_completo": html_completo,
-        "fonte_nome": fonte_nome,
-        "fonte_url": fonte_url,
-        "categoria": categoria,
-        "tempo_leitura": tempo_leitura,
-        "data_formatada": data_formatada,
-        "data_iso": data_iso,
-        "timestamp": caminho_arquivo.stat().st_mtime if caminho_arquivo.exists() else 0,
-    }
-
-
-def ler_todas_noticias(pasta_origem: str = "noticias_prontas") -> list[dict[str, Any]]:
-    """
-    Varre a pasta de notícias prontas, processa todos os arquivos .md e retorna ordenados.
-
-    Args:
-        pasta_origem (str): Nome da pasta contendo os arquivos .md.
-
-    Returns:
-        List[Dict[str, Any]]: Lista de notícias prontas para exibição.
-    """
-    diretorio = Path.cwd() / pasta_origem
-
-    if not diretorio.exists():
-        print(
-            f"[AVISO] A pasta '{pasta_origem}' não existe. Criando diretório vazio..."
-        )
-        diretorio.mkdir(parents=True, exist_ok=True)
-        return []
-
-    arquivos_md = list(diretorio.glob("*.md"))
-    print(
-        f"[+] Encontrados {len(arquivos_md)} arquivo(s) .md em '{diretorio.resolve()}'."
-    )
-
-    noticias = []
-    for arq in arquivos_md:
-        dados = processar_arquivo_markdown(arq)
-        if dados:
-            noticias.append(dados)
-
-    # Ordena por timestamp mais recente primeiro
-    noticias.sort(key=lambda x: x["timestamp"], reverse=True)
-    return noticias
+    return noticias_formatadas
 
 
 def gerar_template_html(noticias: list[dict[str, Any]]) -> str:
@@ -377,7 +319,7 @@ def gerar_template_html(noticias: list[dict[str, Any]]) -> str:
                 <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 8h6v4H7V8z"></path></svg>
             </div>
             <h3 class="text-xl font-bold text-white mb-2">Nenhuma notícia encontrada</h3>
-            <p class="text-slate-400 max-w-md mx-auto text-sm">Execute a Fase 3 para coletar e gerar novos arquivos .md na pasta <code>noticias_prontas</code>.</p>
+            <p class="text-slate-400 max-w-md mx-auto text-sm">Execute a Fase 3 para coletar e persistir novas matérias no banco de dados <code>portal.db</code>.</p>
         </div>
         """
 
@@ -656,7 +598,7 @@ def gerar_template_html(noticias: list[dict[str, Any]]) -> str:
                     <ul class="space-y-2 text-xs text-slate-400">
                         <li><span class="text-indigo-400 font-semibold">Fase 1:</span> Coleta de RSS Feeds</li>
                         <li><span class="text-indigo-400 font-semibold">Fase 2:</span> Curadoria com Gemini IA</li>
-                        <li><span class="text-indigo-400 font-semibold">Fase 3:</span> Geração Markdown (CMS)</li>
+                        <li><span class="text-indigo-400 font-semibold">Fase 3:</span> Persistência Relacional (SQLite)</li>
                         <li><span class="text-indigo-400 font-semibold">Fase 4:</span> Frontend Static Builder</li>
                     </ul>
                 </div>
@@ -770,30 +712,30 @@ def gerar_template_html(noticias: list[dict[str, Any]]) -> str:
 
 
 def construir_site(
-    pasta_origem: str = "noticias_prontas", pasta_destino: str = "public"
+    db_path: str = "portal.db", pasta_destino: str = "public"
 ) -> Path:
     """
-    Executa a leitura das notícias em Markdown, compila o HTML e salva em public/index.html.
+    Executa a leitura das matérias do banco SQLite (portal.db), compila o HTML e salva em public/index.html.
 
     Args:
-        pasta_origem (str): Diretório dos arquivos .md.
-        pasta_destino (str): Diretório de saída do site estático.
+        db_path (str): Caminho do banco de dados SQLite (portal.db).
+        pasta_destino (str): Diretório de saída do site estático (public).
 
     Returns:
         Path: Caminho do arquivo index.html gerado.
     """
     print("\n" + "=" * 80)
-    print(" INICIANDO FASE 4: CONSTRUTOR DO SITE ESTÁTICO (FRONTEND)")
+    print(" INICIANDO FASE 4: CONSTRUTOR DO SITE ESTÁTICO (SQLITE -> HTML)")
     print("=" * 80)
 
     # 1. Cria a pasta public se não existir
     caminho_public = Path.cwd() / pasta_destino
     caminho_public.mkdir(parents=True, exist_ok=True)
 
-    # 2. Lê e processa todos os arquivos .md
-    noticias = ler_todas_noticias(pasta_origem)
+    # 2. Lê e processa todas as matérias diretamente do banco de dados SQLite
+    noticias = carregar_noticias_do_banco(db_path=db_path)
 
-    # 3. Gera o HTML completo
+    # 3. Gera o HTML completo com Tailwind CSS
     print(
         f"\n[+] Renderizando template HTML moderno (Tailwind CSS) com {len(noticias)} notícia(s)..."
     )

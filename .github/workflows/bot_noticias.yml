@@ -60,7 +60,7 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add noticias_prontas/ public/ historico_urls.json
+          git add public/ historico_urls.json portal.db
           if git diff --staged --quiet; then
             echo "Nenhuma alteração detectada para commit."
           else
