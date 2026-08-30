@@ -183,22 +183,35 @@ def processar_arquivo_markdown(caminho_arquivo: Path) -> dict[str, Any] | None:
         fonte_url = "#"
 
     # 4. Extração do Resumo / Corpo textual da notícia
-    conteudo_sem_header = re.sub(r"^#\s+.+$", "", conteudo_bruto, flags=re.MULTILINE)
-    conteudo_sem_header = re.sub(r"!\[.*?\]\(.*?\)", "", conteudo_sem_header)
-    conteudo_sem_header = re.sub(
-        r"🔗\s*\*\*Fonte Original:\*\*.*$", "", conteudo_sem_header, flags=re.MULTILINE
+    match_resumo = re.search(
+        r"##\s+Resumo da Notícia\s*\n+([\s\S]*?)(?=\n+##|\n+---|---|$)", conteudo_bruto
     )
-    conteudo_sem_header = re.sub(
-        r"\*Publicado automaticamente.*$", "", conteudo_sem_header, flags=re.MULTILINE
-    )
-    conteudo_sem_header = re.sub(
-        r"^##\s+Resumo da Notícia", "", conteudo_sem_header, flags=re.MULTILINE
-    )
-    conteudo_sem_header = re.sub(
-        r"^---\s*$", "", conteudo_sem_header, flags=re.MULTILINE
-    )
-
-    texto_resumo_puro = conteudo_sem_header.strip()
+    if match_resumo and match_resumo.group(1).strip():
+        texto_resumo_puro = match_resumo.group(1).strip()
+    else:
+        conteudo_sem_header = re.sub(
+            r"^#\s+.+$", "", conteudo_bruto, flags=re.MULTILINE
+        )
+        conteudo_sem_header = re.sub(r"!\[.*?\]\(.*?\)", "", conteudo_sem_header)
+        conteudo_sem_header = re.sub(
+            r"🔗\s*\*\*Fonte Original:\*\*.*$",
+            "",
+            conteudo_sem_header,
+            flags=re.MULTILINE,
+        )
+        conteudo_sem_header = re.sub(
+            r"\*Publicado automaticamente.*$",
+            "",
+            conteudo_sem_header,
+            flags=re.MULTILINE,
+        )
+        conteudo_sem_header = re.sub(
+            r"^##\s+.*$", "", conteudo_sem_header, flags=re.MULTILINE
+        )
+        conteudo_sem_header = re.sub(
+            r"^---\s*$", "", conteudo_sem_header, flags=re.MULTILINE
+        )
+        texto_resumo_puro = conteudo_sem_header.strip()
 
     # Se a IA retornou erro ou vazio, coloca mensagem amigável
     if not texto_resumo_puro or "Falha na estrutura" in texto_resumo_puro:
@@ -462,6 +475,8 @@ def gerar_template_html(noticias: list[dict[str, Any]]) -> str:
         .prose-custom hr {{ border-color: #1e293b; margin: 1.5rem 0; }}
         .prose-custom a {{ color: #38bdf8; text-decoration: underline; }}
         .prose-custom strong {{ color: #ffffff; }}
+        .prose-custom ul {{ list-style-type: disc; padding-left: 1.5rem; margin-bottom: 1rem; color: #cbd5e1; }}
+        .prose-custom li {{ margin-bottom: 0.5rem; line-height: 1.6; color: #cbd5e1; }}
         /* Custom Scrollbar */
         ::-webkit-scrollbar {{ width: 8px; height: 8px; }}
         ::-webkit-scrollbar-track {{ background: #030712; }}
