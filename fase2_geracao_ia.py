@@ -1,8 +1,9 @@
 """
 MÓDULO: Fase 2 - Curadoria e Geração com IA (Google Gemini API)
-OBJETIVO: Processar os dados brutos minerados na Fase 1 utilizando o modelo Gemini
+OBJETIVO: Processar os dados brutos minerados pela Fase 1 (multicanal) utilizando o modelo Gemini
           com saída forçada em JSON estruturado (application/json) e higienização defensiva de strings.
           Inclui sistema anticota (cache local em historico_urls.json) e mecanismo de retry resiliente.
+          Suporta lista unificada de múltiplas fontes com rastreabilidade via campo 'nome_fonte'.
 """
 
 import json
@@ -22,8 +23,8 @@ if sys.platform == "win32":
     except AttributeError:
         pass
 
-# Importa o extrator modular da Fase 1
-from fase1_coleta_rss import FEEDS_CONFIG, coletar_noticias_rss
+# Importa os extratores modulares da Fase 1
+from fase1_coleta_rss import FEEDS_CONFIG, coletar_todos_os_feeds
 
 
 def carregar_historico(caminho_arquivo: str = "historico_urls.json") -> list[str]:
@@ -118,6 +119,7 @@ def curar_noticia_com_ia(
     cliente: genai.Client,
     titulo_original: str,
     link_original: str,
+    nome_fonte: str = "Desconhecida",
     imagem_url: str | None = None,
     modelo: str = "gemini-3.6-flash",
     max_tentativas: int = 3,
@@ -131,13 +133,15 @@ def curar_noticia_com_ia(
         cliente (genai.Client): Cliente autenticado da API.
         titulo_original (str): Manchete original extraída do RSS.
         link_original (str): Link da matéria original.
+        nome_fonte (str): Nome rastreável da fonte de origem (ex: 'G1', 'TecMundo').
         imagem_url (Optional[str]): URL da foto oficial extraída no RSS (Fase 1).
         modelo (str): Identificador do modelo leve na API do Google (padrão: gemini-3.6-flash).
         max_tentativas (int): Quantidade máxima de tentativas em caso de instabilidade.
         intervalo_retry (int): Tempo de espera em segundos para erros temporários (503).
 
     Returns:
-        Dict[str, Any]: Dicionário contendo título curado, resumo, pontos principais, impacto, link e imagem.
+        Dict[str, Any]: Dicionário contendo título curado, resumo, pontos principais, impacto,
+        link, imagem e nome_fonte.
     """
     system_instruction = (
         "Você é um jornalista sênior, ético e imparcial em um portal de notícias de tecnologia e atualidades.\n"
@@ -202,12 +206,13 @@ Link da Fonte: {link_original}
 
             return {
                 "titulo_original": titulo_original,
-                "titulo_curado": titulo_curado,
-                "resumo": resumo,
+                "titulo_curado":   titulo_curado,
+                "resumo":          resumo,
                 "pontos_principais": pontos_principais,
-                "impacto": impacto,
-                "link": link_original,
-                "imagem_url": imagem_url,
+                "impacto":         impacto,
+                "link":            link_original,
+                "imagem_url":      imagem_url,
+                "nome_fonte":      nome_fonte,
             }
 
         except json.JSONDecodeError as json_err:
@@ -219,12 +224,13 @@ Link da Fonte: {link_original}
                 continue
             return {
                 "titulo_original": titulo_original,
-                "titulo_curado": titulo_original,
-                "resumo": "Falha na estrutura de dados retornada pela IA.",
+                "titulo_curado":   titulo_original,
+                "resumo":          "Falha na estrutura de dados retornada pela IA.",
                 "pontos_principais": ["Processamento automático via pipeline."],
-                "impacto": "Consulte a matéria completa na íntegra.",
-                "link": link_original,
-                "imagem_url": imagem_url,
+                "impacto":         "Consulte a matéria completa na íntegra.",
+                "link":            link_original,
+                "imagem_url":      imagem_url,
+                "nome_fonte":      nome_fonte,
             }
 
         except Exception as e:
@@ -253,76 +259,123 @@ Link da Fonte: {link_original}
 
             return {
                 "titulo_original": titulo_original,
-                "titulo_curado": titulo_original,
-                "resumo": "Falha temporária na geração com IA.",
+                "titulo_curado":   titulo_original,
+                "resumo":          "Falha temporária na geração com IA.",
                 "pontos_principais": ["Instabilidade momentânea no processamento."],
-                "impacto": "Acompanhe as atualizações na fonte oficial.",
-                "link": link_original,
-                "imagem_url": imagem_url,
+                "impacto":         "Acompanhe as atualizações na fonte oficial.",
+                "link":            link_original,
+                "imagem_url":      imagem_url,
+                "nome_fonte":      nome_fonte,
             }
 
 
 def processar_fluxo_completo(
-    limite_noticias: int = 3, feed_chave: str = "g1_tecnologia"
+    limite_por_fonte: int = 2,
+    limite_total_ia: int = 6,
+    feeds: dict | None = None,
 ) -> list[dict[str, str]]:
     """
-    Orquestra a extração da Fase 1, cruza os links coletados com o histórico local (Sistema Anticota),
-    e processa apenas notícias inéditas com a API do Google Gemini. Ao final, registra os novos links
-    em historico_urls.json.
+    Orquestra a extração multicanal da Fase 1, cruza os links coletados com o histórico
+    local (Sistema Anticota), agrupa por fonte, e processa apenas notícias inéditas dentro
+    do limite de segurança da cota da API Gemini.
+
+    Args:
+        limite_por_fonte (int): Máximo de notícias a coletar por fonte RSS.
+        limite_total_ia (int): Teto global de chamadas à API Gemini por execução
+                               (proteção de cota).
+        feeds (dict | None): Subconjunto de feeds a usar. Se None, usa FEEDS_CONFIG completo.
+
+    Returns:
+        List[Dict]: Artigos curados pela IA com campos completos incluindo 'nome_fonte'.
     """
-    print(
-        f"\n[1/3] Coletando até {limite_noticias} notícia(s) do feed '{feed_chave}'..."
+    print("\n" + "=" * 80)
+    print(" FASE 2 — CURADORIA MULTICANAL COM IA (GEMINI)")
+    print("=" * 80)
+
+    # 1. Coleta unificada de todas as fontes configuradas
+    print(f"\n[1/3] Coletando feeds multicanal (até {limite_por_fonte} por fonte)...")
+    feeds_alvo = feeds or FEEDS_CONFIG
+    noticias_brutas = coletar_todos_os_feeds(
+        feeds=feeds_alvo, limite_por_fonte=limite_por_fonte
     )
-    url_feed = FEEDS_CONFIG.get(feed_chave, FEEDS_CONFIG["g1_tecnologia"])
-    noticias_brutas = coletar_noticias_rss(url_feed=url_feed, limite=limite_noticias)
 
     if not noticias_brutas:
-        print("[!] Nenhuma notícia encontrada no feed RSS.")
+        print("[!] Nenhuma notícia encontrada em nenhuma das fontes.")
         return []
 
-    # 2. Sistema Anticota: cruza links do feed com o arquivo historico_urls.json
-    print("[2/3] Consultando cache local (Sistema Anticota)...")
+    # Agrupa contagem por fonte para exibição
+    fontes_contagem: dict[str, int] = {}
+    for n in noticias_brutas:
+        f = n.get("nome_fonte", "Desconhecida")
+        fontes_contagem[f] = fontes_contagem.get(f, 0) + 1
+
+    print(f"    Distribuição por fonte: { {k: v for k, v in fontes_contagem.items()} }")
+
+    # 2. Sistema Anticota: filtra apenas URLs inéditas
+    print("\n[2/3] Consultando cache local (Sistema Anticota)...")
     historico = carregar_historico()
     historico_set = set(historico)
 
     noticias_ineditas = [
-        n
-        for n in noticias_brutas
+        n for n in noticias_brutas
         if n.get("link") and n["link"].strip() not in historico_set
     ]
-    qtd_total = len(noticias_brutas)
+
+    qtd_total   = len(noticias_brutas)
     qtd_ignoradas = qtd_total - len(noticias_ineditas)
-    qtd_ineditas = len(noticias_ineditas)
+    qtd_ineditas  = len(noticias_ineditas)
 
     print(
-        f" -> Foram encontradas {qtd_total} notícias no feed: {qtd_ignoradas} já processadas (ignoradas), {qtd_ineditas} inédita(s) enviada(s) para a IA."
+        f"  -> {qtd_total} coletadas: {qtd_ignoradas} já processadas (ignoradas), "
+        f"{qtd_ineditas} inédita(s) disponíveis para IA."
     )
 
-    # Se não houver notícias inéditas, encerra de forma limpa sem gastar tokens/cotas
     if not noticias_ineditas:
         print("\n" + "=" * 80)
         print("[INFO] Todas as notícias coletadas já foram processadas anteriormente.")
-        print(
-            "[OK] Execução encerrada de forma limpa sem chamadas à API Gemini (Cota preservada!)."
-        )
+        print("[OK] Execução encerrada de forma limpa sem chamadas à API Gemini (Cota preservada!).")
         print("=" * 80 + "\n")
         return []
 
-    # 3. Inicializa o cliente Gemini apenas quando há notícias inéditas a serem processadas
-    print(
-        f"[3/3] Inicializando cliente Gemini e processando {qtd_ineditas} matéria(s) inédita(s)...\n"
+    # Ordena: prioriza fontes com menos registros no histórico (mais novidade)
+    # e dentro de cada fonte mantém a ordem de chegada do feed
+    fontes_no_historico: dict[str, int] = {}
+    for url in historico:
+        for n in noticias_brutas:
+            if n.get("link", "").strip() == url:
+                f = n.get("nome_fonte", "")
+                fontes_no_historico[f] = fontes_no_historico.get(f, 0) + 1
+
+    noticias_ordenadas = sorted(
+        noticias_ineditas,
+        key=lambda n: fontes_no_historico.get(n.get("nome_fonte", ""), 0)
     )
+
+    # Aplica o teto global de chamadas à IA
+    a_processar = noticias_ordenadas[:limite_total_ia]
+    cortadas = len(noticias_ineditas) - len(a_processar)
+
+    if cortadas > 0:
+        print(
+            f"  [!] Limite de cota aplicado: {limite_total_ia} de {qtd_ineditas} inéditas serão enviadas à IA "
+            f"({cortadas} reservadas para próxima execução)."
+        )
+
+    # 3. Processa com a IA
+    print(f"\n[3/3] Inicializando Gemini e curando {len(a_processar)} matéria(s)...\n")
     cliente = obter_cliente_gemini()
 
-    artigos_curados = []
-    urls_processadas = []
+    artigos_curados: list[dict[str, Any]] = []
+    urls_processadas: list[str] = []
 
-    for i, noticia in enumerate(noticias_ineditas, start=1):
-        print(f" -> Curando notícia [{i}/{qtd_ineditas}]: {noticia['titulo'][:55]}...")
+    for i, noticia in enumerate(a_processar, start=1):
+        fonte = noticia.get("nome_fonte", "?")
+        print(f" -> [{fonte}] Curando [{i}/{len(a_processar)}]: {noticia['titulo'][:55]}...")
         artigo = curar_noticia_com_ia(
             cliente=cliente,
             titulo_original=noticia["titulo"],
             link_original=noticia["link"],
+            nome_fonte=fonte,
             imagem_url=noticia.get("imagem_url"),
             modelo="gemini-3.6-flash",
         )
@@ -334,13 +387,13 @@ def processar_fluxo_completo(
     if urls_processadas:
         salvar_historico(urls_processadas)
 
-    # Exibe os resultados finais estruturados no terminal
+    # Exibe os resultados finais no terminal
     print("\n" + "=" * 80)
-    print(" PORTAL DE NOTÍCIAS - CONTEÚDO CURADO POR IA (FASE 2 - JSON 4 CHAVES)")
+    print(" PORTAL DE NOTÍCIAS - CONTEÚDO CURADO POR IA (FASE 2 - MULTICANAL)")
     print("=" * 80)
 
     for idx, art in enumerate(artigos_curados, start=1):
-        print(f"\n[NOTÍCIA #{idx}]")
+        print(f"\n[NOTÍCIA #{idx}] [{art.get('nome_fonte', '?')}]")
         print(f"📌 Original: {art['titulo_original']}")
         print(f"✨ Curado  : {art['titulo_curado']}")
         print(f"🖼️ Imagem  : {art.get('imagem_url') or '[Sem imagem oficial]'}")
@@ -359,4 +412,4 @@ def processar_fluxo_completo(
 
 
 if __name__ == "__main__":
-    processar_fluxo_completo(limite_noticias=3, feed_chave="g1_tecnologia")
+    processar_fluxo_completo(limite_por_fonte=2, limite_total_ia=6)

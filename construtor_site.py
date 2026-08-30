@@ -221,7 +221,7 @@ def carregar_noticias_do_banco(db_path: str = "portal.db") -> List[Dict[str, Any
             "pontos_principais": pontos,
             "impacto": impacto,
             "imagem_url": imagem_url,
-            "fonte_nome": "Portal Oficial",
+            "fonte_nome": item.get("nome_fonte") or "Portal Oficial",
             "fonte_url": link_original,
             "categoria": categoria,
             "data_formatada": data_formatada,
@@ -282,6 +282,9 @@ def gerar_template_html(noticias: list[dict[str, Any]]) -> str:
                         <span class="px-3 py-1 text-xs font-semibold bg-slate-900/80 text-cyan-300 rounded-full border border-cyan-500/30 backdrop-blur-md">
                             {destaque["categoria"]}
                         </span>
+                        <span class="px-3 py-1 text-xs font-semibold bg-slate-900/80 text-amber-300 rounded-full border border-amber-500/30 backdrop-blur-md">
+                            📡 {destaque["fonte_nome"]}
+                        </span>
                     </div>
                 </div>
                 <div class="lg:col-span-5 p-6 sm:p-8 lg:p-10 flex flex-col justify-between bg-slate-900/95">
@@ -331,9 +334,12 @@ def gerar_template_html(noticias: list[dict[str, Any]]) -> str:
             <div class="relative h-48 overflow-hidden bg-slate-950">
                 <img src="{noticia["imagem_url"]}" alt="{html.escape(noticia["titulo"])}" class="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105 opacity-90 group-hover:opacity-100" loading="lazy" onerror="this.src='https://picsum.photos/400/250?grayscale'" />
                 <div class="absolute inset-0 bg-gradient-to-t from-slate-950/90 via-slate-950/20 to-transparent"></div>
-                <div class="absolute top-3 left-3">
+                <div class="absolute top-3 left-3 flex items-center gap-1.5">
                     <span class="px-2.5 py-0.5 text-xs font-semibold bg-slate-900/90 text-cyan-300 rounded-full border border-cyan-500/30 backdrop-blur-md">
                         {noticia["categoria"]}
+                    </span>
+                    <span class="px-2.5 py-0.5 text-xs font-semibold bg-slate-900/90 text-amber-300 rounded-full border border-amber-500/30 backdrop-blur-md">
+                        📡 {noticia["fonte_nome"]}
                     </span>
                 </div>
                 <div class="absolute bottom-3 right-3 text-[11px] font-medium text-slate-300 bg-slate-950/80 px-2 py-0.5 rounded backdrop-blur-sm">

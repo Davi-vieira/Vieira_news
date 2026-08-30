@@ -2,7 +2,8 @@
 MÓDULO: Banco de Dados Relacional (SQLite) - Portal Vieira News
 OBJETIVO: Gerenciar a persistência estruturada das notícias curadas no banco 'portal.db'.
           Substitui o armazenamento em arquivos físicos por uma tabela relacional otimizada,
-          com suporte a serialização/deserialização JSON de arrays e prevenção de duplicatas por slug.
+          com suporte a serialização/deserialização JSON de arrays, rastreabilidade de origem
+          via 'nome_fonte' e prevenção de duplicatas por slug.
 """
 
 import json
@@ -67,12 +68,18 @@ def inicializar_banco(db_path: str = DB_NAME_PADRAO) -> None:
         imagem_url TEXT,
         link_original TEXT,
         categoria TEXT,
+        nome_fonte TEXT,
         data_criacao TEXT NOT NULL
     );
     """
     with obter_conexao(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute(ddl_tabela)
+        # Adiciona coluna nome_fonte em bancos existentes que ainda não a possuem (migração segura)
+        try:
+            cursor.execute("ALTER TABLE noticias ADD COLUMN nome_fonte TEXT;")
+        except Exception:
+            pass  # Coluna já existe — sem ação necessária
         # Índice auxiliar para buscas rápidas por data e slug
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_noticias_data ON noticias(data_criacao DESC);")
         conn.commit()
@@ -99,6 +106,7 @@ def inserir_noticia(noticia: Dict[str, Any], db_path: str = DB_NAME_PADRAO) -> b
     imagem_url = noticia.get("imagem_url") or ""
     link_original = noticia.get("link") or noticia.get("link_original") or ""
     categoria = noticia.get("categoria") or "Tecnologia"
+    nome_fonte = noticia.get("nome_fonte") or ""
     data_criacao = noticia.get("data_criacao") or datetime.now().isoformat()
 
     # Serialização da lista de pontos principais em string JSON
@@ -113,8 +121,8 @@ def inserir_noticia(noticia: Dict[str, Any], db_path: str = DB_NAME_PADRAO) -> b
     sql = """
     INSERT INTO noticias (
         slug, titulo, resumo, pontos_principais, impacto,
-        imagem_url, link_original, categoria, data_criacao
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        imagem_url, link_original, categoria, nome_fonte, data_criacao
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(slug) DO NOTHING;
     """
 
@@ -129,6 +137,7 @@ def inserir_noticia(noticia: Dict[str, Any], db_path: str = DB_NAME_PADRAO) -> b
             imagem_url,
             link_original,
             categoria,
+            nome_fonte,
             data_criacao
         ))
         conn.commit()
