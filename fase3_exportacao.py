@@ -60,7 +60,7 @@ def executar_fase3():
     inicializar_banco()
 
     # 2. Executa a Fase 1 (Coleta RSS) + Fase 2 (Curadoria com Gemini IA)
-    artigos_curados = processar_fluxo_completo(limite_noticias=3, feed_chave="g1_tecnologia")
+    artigos_curados = processar_fluxo_completo(limite_por_fonte=3, limite_total_ia=3)
 
     if not artigos_curados:
         print("[!] Nenhum novo artigo inédito retornado para persistência.")
